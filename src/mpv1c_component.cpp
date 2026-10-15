@@ -1,5 +1,11 @@
-// Отключаем предупреждение GCC 15 о visibility для неклассовых типов 
-// при включении официальных заголовков 1С
+// Для Windows нужно подключить заголовки SDK ДО официальных заголовков 1С,
+// так как в types.h используются типы DATE и IID из Windows SDK
+#ifdef _WIN32
+#include <windows.h>
+#include <wtypes.h>
+#endif
+
+// Подавляем предупреждения GCC 15 о visibility в официальных заголовках 1С
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wattributes"
 
@@ -9,142 +15,126 @@
 
 #pragma GCC diagnostic pop
 
-#include <string>
-#include <cstring>
-#include <cstdint>
-#include <fstream>
+#include <cstddef>
 
-
-void LogToFile(const std::string& msg) {
-    std::ofstream log("/tmp/mpv1c_debug.log", std::ios::app);
-    if (log.is_open()) {
-        log << msg << std::endl;
-        log.flush();
-    }
-}
-
-class Mpv1cComponent : public IComponentBase {
+class CMpv1c : public IComponentBase
+{
 private:
-    IAddInDefBase*  m_iConnect = nullptr;
-    IMemoryManager* m_iMemory = nullptr;
-
-    WCHAR_T* AllocWString(const std::string& str) {
-        if (!m_iMemory) return nullptr;
-        size_t len = str.length();
-        size_t bytes = (len + 1) * sizeof(WCHAR_T);
-        WCHAR_T* buf = nullptr;
-        if (m_iMemory->AllocMemory((void**)&buf, bytes)) {
-            for (size_t i = 0; i < len; ++i) {
-                buf[i] = static_cast<WCHAR_T>(str[i]);
-            }
-            buf[len] = 0;
-            return buf;
-        }
-        return nullptr;
-    }
+    IAddInDefBase* m_iConnect;
+    IMemoryManager* m_iMemory;
 
 public:
-    Mpv1cComponent() { LogToFile("=== Mpv1cComponent constructor ==="); }
-    virtual ~Mpv1cComponent() { LogToFile("=== Mpv1cComponent destructor ==="); }
+    CMpv1c() : m_iConnect(nullptr), m_iMemory(nullptr) {}
+    virtual ~CMpv1c() {}
 
-    bool ADDIN_API Init(void* disp) override { 
-        LogToFile("Init() called");
+    bool ADDIN_API Init(void* disp) override
+    {
         m_iConnect = static_cast<IAddInDefBase*>(disp);
-        return true; 
+        return true;
     }
-    
-    bool ADDIN_API setMemManager(void* mem) override { 
-        LogToFile("setMemManager() called");
-        m_iMemory = static_cast<IMemoryManager*>(mem); 
+
+    bool ADDIN_API setMemManager(void* mem) override
+    {
+        m_iMemory = static_cast<IMemoryManager*>(mem);
+        return true;
+    }
+
+    long ADDIN_API GetInfo() override
+    {
+        return 2100;
+    }
+
+    void ADDIN_API Done() override {}
+
+    bool ADDIN_API RegisterExtensionAs(WCHAR_T** wsExtensionName) override
+    {
+        // Используем u"" для char16_t (WCHAR_T в современном SDK на Linux)
+        const WCHAR_T* wsExtension = u"Mpv1c";
         
-        // Тестовое сообщение в журнал регистрации 1С при успешной инициализации
-        if (m_iConnect && m_iMemory) {
-            WCHAR_T* msg = AllocWString("Mpv1c plugin initialized successfully");
-            WCHAR_T* source = AllocWString("Mpv1c");
-            
-            if (msg && source) {
-                // 1005 = ADDIN_E_INFO (информационное сообщение в журнал 1С)
-                m_iConnect->AddError(1005, source, msg, 0);
-                m_iMemory->FreeMemory((void**)&msg);
-                m_iMemory->FreeMemory((void**)&source);
-            } else {
-                // Освобождаем память, если одна из строк не выделилась
-                if (msg) m_iMemory->FreeMemory((void**)&msg);
-                if (source) m_iMemory->FreeMemory((void**)&source);
+        // Безопасный подсчет длины без wcslen
+        size_t len = 0;
+        while (wsExtension[len] != u'\0') {
+            len++;
+        }
+        size_t iActualSize = len + 1;
+        
+        if (m_iMemory)
+        {
+            if (m_iMemory->AllocMemory((void**)wsExtensionName, iActualSize * sizeof(WCHAR_T)))
+            {
+                WCHAR_T* dest = static_cast<WCHAR_T*>(*wsExtensionName);
+                for (size_t i = 0; i < iActualSize; i++)
+                {
+                    dest[i] = wsExtension[i];
+                }
+                return true;
             }
         }
-        return true; 
+        return false;
     }
-    
-    long ADDIN_API GetInfo() override { 
-        return 2100; // API версия 2.10
-    }
-    
-    void ADDIN_API Done() override {
-        LogToFile("Done() called");
-    }
-    
-    bool ADDIN_API RegisterExtensionAs(WCHAR_T** wsExtensionName) override {
-        *wsExtensionName = AllocWString("Mpv1c");
-        return *wsExtensionName != nullptr;
-    }
-    
+
+    // --- Свойства ---
     long ADDIN_API GetNProps() override { return 0; }
     long ADDIN_API FindProp(const WCHAR_T* wsPropName) override { return -1; }
-    const WCHAR_T* GetPropName(long lPropNum, long lPropAlias) override { return nullptr; }
+    const WCHAR_T* ADDIN_API GetPropName(long lPropNum, long lPropAlias) override { return nullptr; }
     bool ADDIN_API GetPropVal(long lPropNum, tVariant* pvarPropVal) override { return false; }
     bool ADDIN_API SetPropVal(long lPropNum, tVariant* pvarPropVal) override { return false; }
     
-    // КРИТИЧЕСКИ ВАЖНО: сигнатура с bool*
-    bool ADDIN_API IsPropReadable(long lPropNum, bool *pbVal) override { 
-        if (pbVal) *pbVal = false; 
-        return true; 
-    }
-    bool ADDIN_API IsPropWritable(long lPropNum, bool *pbVal) override { 
-        if (pbVal) *pbVal = false; 
-        return true; 
-    }
-    
+    // ИСПРАВЛЕНО: В современном SDK эти методы принимают только один аргумент
+    bool ADDIN_API IsPropReadable(long lPropNum) override { return false; }
+    bool ADDIN_API IsPropWritable(long lPropNum) override { return false; }
+
+    // --- Методы ---
     long ADDIN_API GetNMethods() override { return 0; }
     long ADDIN_API FindMethod(const WCHAR_T* wsMethodName) override { return -1; }
-    const WCHAR_T* GetMethodName(long lMethodNum, long lMethodAlias) override { return nullptr; }
+    const WCHAR_T* ADDIN_API GetMethodName(long lMethodNum, long lMethodAlias) override { return nullptr; }
     long ADDIN_API GetNParams(long lMethodNum) override { return 0; }
     bool ADDIN_API GetParamDefValue(long lMethodNum, long lParamNum, tVariant *pvarParamDefValue) override { return false; }
     bool ADDIN_API HasRetVal(long lMethodNum) override { return false; }
     bool ADDIN_API CallAsProc(long lMethodNum, tVariant* paParams, long lSizeArray) override { return false; }
     bool ADDIN_API CallAsFunc(long lMethodNum, tVariant* pvarRetValue, tVariant* paParams, long lSizeArray) override { return false; }
+
+    // ИСПРАВЛЕНО: В современном SDK этот метод возвращает void, а не bool
+    void ADDIN_API SetLocale(const WCHAR_T* loc) override {}
     
-    bool ADDIN_API SetLocale(const WCHAR_T* loc) override { return true; }
+    // ИСПРАВЛЕНО: Добавлен обязательный метод из современного SDK
+    void ADDIN_API SetUserInterfaceLanguageCode(const WCHAR_T* lang) override {}
 };
 
 // ============================================================================
-// ЭКСПОРТНЫЕ ФУНКЦИИ
+// ЭКСПОРТНЫЕ ФУНКЦИИ (СТРОГО по официальным заголовкам ComponentBase.h)
 // ============================================================================
 
-static WCHAR_T g_classNames[] = { 'M', 'p', 'v', '1', 'c', '\0' };
+static WCHAR_T g_classNames[] = { u'M', u'p', u'v', u'1', u'c', u'\0' };
 
-extern "C" long ADDIN_API GetClassNames(WCHAR_T** names) {
-    *names = g_classNames;
-    return 1;
+// ИСПРАВЛЕНО: Нет параметров, возвращает const WCHAR_T*
+extern "C" const WCHAR_T* ADDIN_API GetClassNames()
+{
+    return g_classNames;
 }
 
-extern "C" long ADDIN_API GetClassObject(const WCHAR_T* wsName, IComponentBase** pInterface) {
+extern "C" long ADDIN_API GetClassObject(const WCHAR_T* wsName, IComponentBase** pInterface)
+{
     if (!pInterface) return 0;
-    *pInterface = new Mpv1cComponent();
+    *pInterface = new CMpv1c();
     return 1;
 }
 
-extern "C" long ADDIN_API DestroyObject(IComponentBase** pInterface) {
+extern "C" long ADDIN_API DestroyObject(IComponentBase** pInterface)
+{
     if (!pInterface || !*pInterface) return 0;
-    delete *pInterface; 
+    delete *pInterface;
     *pInterface = nullptr;
     return 0;
 }
 
-extern "C" long ADDIN_API SetPlatformCapabilities(long capabilities) {
-    return 1; // eAppCapabilities1
+// ИСПРАВЛЕНО: Используем типы enum из SDK, а не long
+extern "C" AppCapabilities ADDIN_API SetPlatformCapabilities(const AppCapabilities capabilities)
+{
+    return eAppCapabilities1; 
 }
 
-extern "C" long ADDIN_API GetAttachType() {
-    return 1; // eCanAttachNotIsolated
+extern "C" AttachType ADDIN_API GetAttachType()
+{
+    return eCanAttachNotIsolated; 
 }
