@@ -1,6 +1,10 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <wtypes.h>
+#else
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <X11/Xatom.h>
 #endif
 
 #pragma GCC diagnostic push
@@ -15,35 +19,28 @@
 #include <string>
 #include <thread>
 #include <atomic>
-#include <fstream>
-#include <cstdlib>
 #include <mpv/client.h>
 
 // ============================================================================
-// Логирование в файл (для диагностики)
-// ============================================================================
-static void LogMsg(const std::string& msg) {
-    std::ofstream log("/tmp/mpv1c_debug.log", std::ios::app);
-    if (log.is_open()) {
-        log << msg << std::endl;
-    }
-}
-
-// ============================================================================
-// Перечисление методов
+// 1. Перечисление методов
 // ============================================================================
 enum Methods {
     eVersion = 0,
     eTestFunc,
+    eGet1CWindowId,
     eInitialize,
     eSetParentWindow,
     ePlay,
     eMethLast
 };
 
+// ============================================================================
+// 2. Массивы имён методов (WCHAR_T для кроссплатформенности)
+// ============================================================================
 static const WCHAR_T g_MethodNamesRu[][32] = {
     { u'В', u'е', u'р', u'с', u'и', u'я', 0 },
     { u'Т', u'е', u'с', u'т', u'о', u'в', u'а', u'я', u'Ф', u'у', u'н', u'к', u'ц', u'и', u'я', 0 },
+    { u'П', u'о', u'л', u'у', u'ч', u'и', u'т', u'ь', u'И', u'д', u'е', u'н', u'т', u'и', u'ф', u'и', u'к', u'а', u'т', u'о', u'р', u'О', u'к', u'н', u'а', u'1', u'С', 0 },
     { u'И', u'н', u'и', u'ц', u'и', u'а', u'л', u'и', u'з', u'и', u'р', u'о', u'в', u'а', u'т', u'ь', 0 },
     { u'У', u'с', u'т', u'а', u'н', u'о', u'в', u'и', u'т', u'ь', u'Р', u'о', u'д', u'и', u'т', u'е', u'л', u'ь', u'с', u'к', u'о', u'е', u'О', u'к', u'н', u'о', 0 },
     { u'В', u'о', u'с', u'п', u'р', u'о', u'и', u'з', u'в', u'е', u'с', u'т', u'и', 0 }
@@ -52,13 +49,14 @@ static const WCHAR_T g_MethodNamesRu[][32] = {
 static const WCHAR_T g_MethodNamesEn[][32] = {
     { u'V', u'e', u'r', u's', u'i', u'o', u'n', 0 },
     { u'T', u'e', u's', u't', u'F', u'u', u'n', u'c', 0 },
+    { u'G', u'e', u't', u'1', u'C', u'W', u'i', u'n', u'd', u'o', u'w', u'I', u'd', 0 },
     { u'I', u'n', u'i', u't', u'i', u'a', u'l', u'i', u'z', u'e', 0 },
     { u'S', u'e', u't', u'P', u'a', u'r', u'e', u'n', u't', u'W', u'i', u'n', u'd', u'o', u'w', 0 },
     { u'P', u'l', u'a', u'y', 0 }
 };
 
 // ============================================================================
-// Класс компоненты
+// 3. Класс компоненты
 // ============================================================================
 class CMpv1c : public IComponentBase {
 private:
@@ -71,24 +69,15 @@ private:
     std::thread m_eventThread;
     std::atomic<bool> m_stopEventLoop{false};
 
+    // Поток обработки событий mpv
     void eventLoop() {
-        LogMsg("[EventThread] Start");
         while (!m_stopEventLoop && m_mpv) {
             mpv_event* event = mpv_wait_event(m_mpv, 0.1);
             if (event->event_id == MPV_EVENT_NONE) continue;
-            
-            // Логируем все события mpv
-            std::string evName = mpv_event_name(event->event_id);
-            LogMsg("[EventThread] Event: " + evName);
-            
-            if (event->event_id == MPV_EVENT_LOG_MESSAGE) {
-                mpv_event_log_message* msg = (mpv_event_log_message*)event->data;
-                LogMsg(std::string("[mpv log] ") + msg->prefix + ": " + msg->text);
-            }
         }
-        LogMsg("[EventThread] Stop");
     }
 
+    // Конвертация WCHAR_T (UTF-16) → UTF-8
     std::string WcharToUtf8(const WCHAR_T* wstr, size_t len) {
         if (!wstr || len == 0) return "";
         std::string result;
@@ -109,6 +98,7 @@ private:
         return result;
     }
 
+    // Извлечение int64 из tVariant любого числового типа
     bool VariantToInt64(const tVariant* pv, int64_t& result) {
         if (!pv) return false;
         switch (pv->vt) {
@@ -131,16 +121,11 @@ private:
     }
 
 public:
-    CMpv1c() : m_iConnect(nullptr), m_iMemory(nullptr), m_mpv(nullptr), m_windowId(0) {
-        LogMsg("=== CMpv1c constructor ===");
-    }
+    CMpv1c() : m_iConnect(nullptr), m_iMemory(nullptr), m_mpv(nullptr), m_windowId(0) {}
     
     virtual ~CMpv1c() {
-        LogMsg("=== CMpv1c destructor ===");
         m_stopEventLoop = true;
-        if (m_eventThread.joinable()) {
-            m_eventThread.join();
-        }
+        if (m_eventThread.joinable()) m_eventThread.join();
         if (m_mpv) {
             mpv_terminate_destroy(m_mpv);
             m_mpv = nullptr;
@@ -148,22 +133,19 @@ public:
     }
 
     bool ADDIN_API Init(void* disp) override {
-        LogMsg("Init() called");
         m_iConnect = static_cast<IAddInDefBase*>(disp);
         return true;
     }
 
     bool ADDIN_API setMemManager(void* mem) override {
-        LogMsg("setMemManager() called");
         m_iMemory = static_cast<IMemoryManager*>(mem);
         return true;
     }
 
     long ADDIN_API GetInfo() override { return 2000; }
-    void ADDIN_API Done() override { LogMsg("Done() called"); }
+    void ADDIN_API Done() override {}
 
     bool ADDIN_API RegisterExtensionAs(WCHAR_T** wsExtensionName) override {
-        LogMsg("RegisterExtensionAs() called");
         const WCHAR_T* wsExtension = u"Mpv1c";
         size_t len = 0;
         while (wsExtension[len] != u'\0') len++;
@@ -177,6 +159,7 @@ public:
         return false;
     }
 
+    // --- Свойства (заглушки) ---
     long ADDIN_API GetNProps() override { return 0; }
     long ADDIN_API FindProp(const WCHAR_T* wsPropName) override { return -1; }
     const WCHAR_T* ADDIN_API GetPropName(long lPropNum, long lPropAlias) override { return nullptr; }
@@ -185,6 +168,7 @@ public:
     bool ADDIN_API IsPropReadable(long lPropNum) override { return false; }
     bool ADDIN_API IsPropWritable(long lPropNum) override { return false; }
 
+    // --- Методы: Метаданные ---
     long ADDIN_API GetNMethods() override { return eMethLast; }
 
     long ADDIN_API FindMethod(const WCHAR_T* wsMethodName) override {
@@ -231,6 +215,7 @@ public:
         switch (lMethodNum) {
             case eVersion:         return 0;
             case eTestFunc:        return 0;
+            case eGet1CWindowId:   return 0;
             case eInitialize:      return 0;
             case eSetParentWindow: return 1;
             case ePlay:            return 1;
@@ -245,31 +230,22 @@ public:
 
     bool ADDIN_API HasRetVal(long lMethodNum) override {
         switch (lMethodNum) {
-            case eVersion:  return true;
-            case eTestFunc: return true;
-            case ePlay:     return true;
-            case eInitialize:      return false;
+            case eVersion:        return true;
+            case eTestFunc:       return true;
+            case eGet1CWindowId:  return true;
+            case ePlay:           return true;
+            case eInitialize:     return false;
             case eSetParentWindow: return false;
         }
         return false;
     }
 
+    // --- Методы: Исполнение (процедуры) ---
     bool ADDIN_API CallAsProc(long lMethodNum, tVariant* paParams, long lSizeArray) override {
-        LogMsg("CallAsProc: method=" + std::to_string(lMethodNum));
-        
         switch (lMethodNum) {
             case eInitialize: {
-                LogMsg("[Init] Starting mpv initialization...");
-                
-                // Логируем переменную окружения DISPLAY
-                const char* display = std::getenv("DISPLAY");
-                LogMsg(std::string("[Init] DISPLAY=") + (display ? display : "(null)"));
-                
-                // Останавливаем предыдущий поток
                 m_stopEventLoop = true;
-                if (m_eventThread.joinable()) {
-                    m_eventThread.join();
-                }
+                if (m_eventThread.joinable()) m_eventThread.join();
                 
                 if (m_mpv) {
                     mpv_terminate_destroy(m_mpv);
@@ -277,52 +253,26 @@ public:
                 }
                 
                 m_mpv = mpv_create();
-                if (!m_mpv) {
-                    LogMsg("[Init] ERROR: mpv_create() returned NULL");
-                    return false;
-                }
-                LogMsg("[Init] mpv_create() OK");
+                if (!m_mpv) return false;
                 
-                // Включаем подробное логирование mpv
-                int level = MPV_LOG_LEVEL_V;
-                mpv_request_log_messages(m_mpv, "v");
+                mpv_set_option_string(m_mpv, "force-window", "yes");
+                mpv_set_option_string(m_mpv, "idle", "yes");
+                mpv_set_option_string(m_mpv, "keep-open", "yes");
                 
-                // Устанавливаем опции через mpv_set_option_string (проще и надёжнее)
-                int r1 = mpv_set_option_string(m_mpv, "force-window", "yes");
-                LogMsg("[Init] force-window=yes: " + std::to_string(r1));
-                
-                int r2 = mpv_set_option_string(m_mpv, "idle", "yes");
-                LogMsg("[Init] idle=yes: " + std::to_string(r2));
-                
-                int r3 = mpv_set_option_string(m_mpv, "keep-open", "yes");
-                LogMsg("[Init] keep-open=yes: " + std::to_string(r3));
-                
-                // Если окно задано — применяем
                 if (m_windowId != 0) {
                     char wid_str[32];
                     snprintf(wid_str, sizeof(wid_str), "%lld", (long long)m_windowId);
-                    int r4 = mpv_set_option_string(m_mpv, "wid", wid_str);
-                    LogMsg("[Init] wid=" + std::string(wid_str) + ": " + std::to_string(r4));
+                    mpv_set_option_string(m_mpv, "wid", wid_str);
                 }
                 
-                // Инициализация
-                int initResult = mpv_initialize(m_mpv);
-                LogMsg("[Init] mpv_initialize() returned: " + std::to_string(initResult));
-                
-                if (initResult < 0) {
-                    LogMsg("[Init] ERROR: mpv_initialize failed with code " + std::to_string(initResult));
+                if (mpv_initialize(m_mpv) < 0) {
                     mpv_terminate_destroy(m_mpv);
                     m_mpv = nullptr;
                     return false;
                 }
                 
-                LogMsg("[Init] mpv_initialize() SUCCESS");
-                
-                // Запускаем поток обработки событий
                 m_stopEventLoop = false;
                 m_eventThread = std::thread(&CMpv1c::eventLoop, this);
-                LogMsg("[Init] Event thread started");
-                
                 return true;
             }
             
@@ -332,7 +282,6 @@ public:
                 int64_t wid;
                 if (!VariantToInt64(&paParams[0], wid)) return false;
                 m_windowId = wid;
-                LogMsg("[SetWindow] wid=" + std::to_string(wid));
                 
                 if (m_mpv) {
                     char wid_str[32];
@@ -345,9 +294,8 @@ public:
         return false;
     }
 
+    // --- Методы: Исполнение (функции) ---
     bool ADDIN_API CallAsFunc(long lMethodNum, tVariant* pvarRetValue, tVariant* paParams, long lSizeArray) override {
-        LogMsg("CallAsFunc: method=" + std::to_string(lMethodNum));
-        
         switch (lMethodNum) {
             case eVersion: {
                 const WCHAR_T* res = u"1.0";
@@ -381,9 +329,73 @@ public:
                 return false;
             }
             
+            case eGet1CWindowId: {
+                int64_t windowId = 0;
+#ifdef _WIN32
+                // Для Windows: ищем окно по классу "V8Window" или "1CV8Window"
+                HWND hwnd = FindWindowW(L"V8Window", NULL);
+                if (!hwnd) hwnd = FindWindowW(L"1CV8Window", NULL);
+                if (!hwnd) hwnd = GetForegroundWindow();
+                windowId = static_cast<int64_t>(reinterpret_cast<uintptr_t>(hwnd));
+#else
+                // Для Linux X11: ищем окно через _NET_ACTIVE_WINDOW или по классу WM_CLASS
+                Display* display = XOpenDisplay(NULL);
+                if (display) {
+                    Window root = DefaultRootWindow(display);
+                    
+                    // Сначала пробуем получить активное окно (самый надёжный способ)
+                    Atom activeWindowAtom = XInternAtom(display, "_NET_ACTIVE_WINDOW", False);
+                    Atom actualType;
+                    int actualFormat;
+                    unsigned long nItems, bytesAfter;
+                    unsigned char* prop = NULL;
+                    
+                    if (XGetWindowProperty(display, root, activeWindowAtom, 0, 1, False, 
+                                           XA_WINDOW, &actualType, &actualFormat, 
+                                           &nItems, &bytesAfter, &prop) == Success && prop) {
+                        windowId = static_cast<int64_t>(*(Window*)prop);
+                        XFree(prop);
+                    }
+                    
+                    // Если не нашли активное окно, ищем по классу WM_CLASS
+                    if (windowId == 0) {
+                        Window returnedRoot;
+                        Window* children;
+                        unsigned int nchildren;
+                        if (XQueryTree(display, root, &returnedRoot, &returnedRoot, &children, &nchildren)) {
+                            for (unsigned int i = 0; i < nchildren; i++) {
+                                XClassHint classHint;
+                                if (XGetClassHint(display, children[i], &classHint)) {
+                                    std::string resName = classHint.res_name ? classHint.res_name : "";
+                                    std::string resClass = classHint.res_class ? classHint.res_class : "";
+                                    
+                                    if (resName.find("1cv8") != std::string::npos || 
+                                        resName.find("1c") != std::string::npos ||
+                                        resClass.find("1cv8") != std::string::npos ||
+                                        resClass.find("1c") != std::string::npos) {
+                                        windowId = static_cast<int64_t>(children[i]);
+                                        if (classHint.res_name) XFree(classHint.res_name);
+                                        if (classHint.res_class) XFree(classHint.res_class);
+                                        break;
+                                    }
+                                    if (classHint.res_name) XFree(classHint.res_name);
+                                    if (classHint.res_class) XFree(classHint.res_class);
+                                }
+                            }
+                            XFree(children);
+                        }
+                    }
+                    
+                    XCloseDisplay(display);
+                }
+#endif
+                pvarRetValue->vt = VTYPE_I4;
+                pvarRetValue->lVal = static_cast<long>(windowId);
+                return true;
+            }
+            
             case ePlay: {
                 if (!m_mpv || lSizeArray < 1) {
-                    LogMsg("[Play] ERROR: mpv not initialized or no params");
                     pvarRetValue->vt = VTYPE_BOOL;
                     pvarRetValue->bVal = false;
                     return true;
@@ -392,7 +404,6 @@ public:
                 const WCHAR_T* wstr = paParams[0].pwstrVal;
                 size_t wlen = paParams[0].wstrLen;
                 std::string url = WcharToUtf8(wstr, wlen);
-                LogMsg("[Play] URL: " + url);
                 
                 if (url.empty()) {
                     pvarRetValue->vt = VTYPE_BOOL;
@@ -402,7 +413,6 @@ public:
                 
                 const char* cmd[] = {"loadfile", url.c_str(), NULL};
                 int err = mpv_command(m_mpv, cmd);
-                LogMsg("[Play] mpv_command(loadfile) returned: " + std::to_string(err));
                 
                 pvarRetValue->vt = VTYPE_BOOL;
                 pvarRetValue->bVal = (err >= 0);
@@ -417,12 +427,14 @@ public:
 };
 
 // ============================================================================
-// Экспортные функции
+// 4. Экспортные функции
 // ============================================================================
 
 static WCHAR_T g_classNames[] = { u'M', u'p', u'v', u'1', u'c', u'\0' };
 
-extern "C" const WCHAR_T* ADDIN_API GetClassNames() { return g_classNames; }
+extern "C" const WCHAR_T* ADDIN_API GetClassNames() { 
+    return g_classNames; 
+}
 
 extern "C" long ADDIN_API GetClassObject(const WCHAR_T* wsName, IComponentBase** pInterface) {
     if (!pInterface) return 0;
