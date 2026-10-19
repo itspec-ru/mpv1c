@@ -16,6 +16,10 @@
 #pragma GCC diagnostic pop
 
 #include <cstddef>
+#include <cstring>
+#include <string>
+
+#include <mpv/client.h> 
 
 class CMpv1c : public IComponentBase
 {
